@@ -181,7 +181,7 @@ monitor_output_name() {
 # DP-2 and one this window wrote against the description of the screen in DP-2
 # are recognised as being about the same display.
 monitor_config_settings() {
-  local file line name mode scale live out='{}'
+  local file line name mode scale position mirror transform live out='{}'
   live=$(monitor_live)
   while IFS= read -r line; do
     name=$(sed -nE 's/.*output *= *"([^"]+)".*/\1/p' <<<"$line")
@@ -189,10 +189,17 @@ monitor_config_settings() {
     name=$(monitor_key "$name" "$live")
     mode=$(sed -nE 's/.*mode *= *"([^"]+)".*/\1/p' <<<"$line")
     scale=$(sed -nE 's/.*scale *= *([0-9]+(\.[0-9]+)?).*/\1/p' <<<"$line")
+    position=$(sed -nE 's/.*position *= *"([^"]+)".*/\1/p' <<<"$line")
+    mirror=$(sed -nE 's/.*mirror *= *"([^"]+)".*/\1/p' <<<"$line")
+    transform=$(sed -nE 's/.*transform *= *([0-9]+).*/\1/p' <<<"$line")
     out=$(jq -c --arg n "$name" --arg m "$mode" --arg s "$scale" \
+      --arg p "${position:-}" --arg mir "${mirror:-}" --arg t "${transform:-}" \
       '.[$n] = ((.[$n] // {})
         | (if $m == "" then . else .mode = $m end)
-        | (if $s == "" then . else .scale = ($s | tonumber) end))' <<<"$out")
+        | (if $s == "" then . else .scale = ($s | tonumber) end)
+        | (if $p == "" then . else .position = $p end)
+        | (if $mir == "" then . else .mirror = $mir end)
+        | (if $t == "" then . else .transform = ($t | tonumber) end))' <<<"$out")
   done < <(for file in "$HYPR_DIR"/*.lua; do
              [[ -f $file ]] || continue
              [[ $file == "$MANAGED_LUA" ]] && continue
@@ -238,6 +245,9 @@ monitor_state() {
           # it, else what it is actually running.
           mode: ($ours.mode // $live.mode // $theirs.mode // "preferred"),
           scale: ($ours.scale // $live.scale // $theirs.scale // 1),
+          position: ($ours.position // $theirs.position // "auto"),
+          mirror: ($ours.mirror // $theirs.mirror // ""),
+          transform: ($ours.transform // $theirs.transform // 0),
           settings: $ours,
           configured: $theirs };
     ($live | map(.key)) as $connected
@@ -251,13 +261,84 @@ monitor_state() {
 # generated file so the two can never say different things.
 monitor_lua_table() {
   local name=$1 settings=$2
-  jq -rn --arg n "$name" --argjson s "$settings" '
+  # Resolve position from symbolic name to pixel coordinates
+  local position_value
+  position_value=$(jq -r '.position // "auto"' <<<"$settings")
+  local resolved_position
+  resolved_position=$(monitor_resolve_position "$name" "$position_value" "$settings")
+  
+  # Build the settings JSON with resolved position
+  local resolved_settings
+  resolved_settings=$(jq -c --arg p "$resolved_position" '. + { position: $p } | del(.position) | .position = $p' <<<"$settings")
+  
+  jq -rn --arg n "$name" --argjson s "$resolved_settings" '
     "{ output = " + ($n | @json)
-    + ([$s | to_entries[]
+    + ([ $s | to_entries[]
         | ", " + .key + " = "
           + (if (.value | type) == "string" then (.value | @json) else (.value | tostring) end)]
        | join(""))
     + " }"'
+}
+
+# Resolve a symbolic position (auto, left, right, above, below) to pixel coordinates.
+# For "auto", let Hyprland decide. For directional positions, calculate based on
+# the other connected monitors' dimensions.
+monitor_resolve_position() {
+  local name=$1 position=$2 settings=$3
+  
+  # Auto position - let Hyprland handle it
+  [[ "$position" == "auto" ]] && { echo "auto"; return 0; }
+  
+  # Get all connected monitors
+  local monitors
+  monitors=$(monitor_live)
+  
+  # Find the "primary" monitor (the one this display is not)
+  local primary_width=0 primary_height=0 primary_x=0 primary_y=0
+  local this_width this_height
+  this_width=$(jq -r '.width // 0' <<<"$(monitor_find "$name" "$monitors")")
+  this_height=$(jq -r '.height // 0' <<<"$(monitor_find "$name" "$monitors")")
+  
+  # Find the largest other connected monitor as the reference
+  local primary
+  primary=$(jq -c --arg n "$name" '
+    [.[] | select(.key != $n and .connected == true)] | 
+    sort_by(.width * .height) | reverse | first // {}' <<<"$monitors")
+  
+  if [[ "$primary" == "{}" || -z "$primary" ]]; then
+    # No other monitor, just use auto
+    echo "auto"
+    return 0
+  fi
+  
+  primary_width=$(jq -r '.width // 0' <<<"$primary")
+  primary_height=$(jq -r '.height // 0' <<<"$primary")
+  primary_x=$(jq -r '.x // 0' <<<"$(monitor_find "$(jq -r '.key' <<<"$primary")" "$monitors")")
+  primary_y=$(jq -r '.y // 0' <<<"$(monitor_find "$(jq -r '.key' <<<"$primary")" "$monitors")")
+  
+  case "$position" in
+    left)
+      echo "$((primary_x - this_width))x${primary_y}"
+      ;;
+    right)
+      echo "$((primary_x + primary_width))x${primary_y}"
+      ;;
+    above)
+      # Center horizontally above
+      local x=$((primary_x + (primary_width - this_width) / 2))
+      [[ $x -lt 0 ]] && x=0
+      echo "${x}x$((primary_y - this_height))"
+      ;;
+    below)
+      # Center horizontally below
+      local x=$((primary_x + (primary_width - this_width) / 2))
+      [[ $x -lt 0 ]] && x=0
+      echo "${x}x$((primary_y + primary_height))"
+      ;;
+    *)
+      echo "$position"
+      ;;
+  esac
 }
 
 monitor_settings() {
@@ -294,12 +375,26 @@ monitor_set() {
 
   case $field in
     mode)
-      [[ $value == preferred || $value =~ ^[0-9]+x[0-9]+@[0-9]+(\.[0-9]+)?$ ]] \
+      [[ $value == preferred || $value =~ ^[0-9]+x[0-9]+@[0-9]+(\\.[0-9]+)?$ ]] \
         || die "'$value' is not a resolution"
       monitor_mode_supported "$name" "$value" || die "$name cannot run $value"
       json=$(jq -Rn --arg v "$value" '$v') ;;
     scale)
-      [[ $value =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "'$value' is not a scale"
+      [[ $value =~ ^[0-9]+(\\.[0-9]+)?$ ]] || die "'$value' is not a scale"
+      json=$value ;;
+    position)
+      # Position is a symbolic name that gets resolved to pixel coordinates
+      # when the Lua table is built. Valid values: auto, left, right, above, below.
+      [[ $value =~ ^(auto|left|right|above|below)$ ]] || die "'$value' is not a valid position"
+      json=$(jq -Rn --arg v "$value" '$v') ;;
+    mirror)
+      # Mirror is the name/key of the monitor to mirror from, or empty to disable.
+      [[ -z $value || $value =~ $MONITOR_NAME_RE || $value =~ $MONITOR_DESC_RE ]] \
+        || die "'$value' is not a valid monitor name"
+      json=$(jq -Rn --arg v "$value" '$v') ;;
+    transform)
+      # Transform: 0=normal, 1=90°, 2=180°, 3=270°
+      [[ $value =~ ^[0-3]$ ]] || die "'$value' is not a valid transform (0-3)"
       json=$value ;;
     *) die "unknown display setting '$field'" ;;
   esac
@@ -330,14 +425,16 @@ monitor_set() {
   return 0
 }
 
-# What a display is running, in the shape a rule takes. No position: Omarchy's
-# own rule places every display with `position = "auto"`, so leaving it out is
-# what keeps the arrangement it already had.
+# What a display is running, in the shape a rule takes. Position, mirror, and
+# transform are included when set, so the rule carries the full state.
 monitor_in_force() {
   local found
   found=$(monitor_find "$1")
   [[ $found == null ]] && { echo '{}'; return 0; }
-  jq -c '{ mode: .mode, scale: .scale }' <<<"$found"
+  jq -c '{ mode: .mode, scale: .scale,
+           position: (.position // null),
+           mirror: (.mirror // null),
+           transform: (.transform // null) } | with_entries(select(.value != null))' <<<"$found"
 }
 
 # Putting one back writes the value the display had and then drops the rule:

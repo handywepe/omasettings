@@ -79,6 +79,61 @@ Ui.SectionBody {
         onResetRequested: app.resetSetting("monitor:" + name + ":scale")
       }
 
+      // Position: where this display sits relative to others.
+      Ui.PickerRow {
+        label: "Position"
+        description: connected ? "" : "Applied when the display comes back."
+        value: String(modelData.position || "auto")
+        options: [
+          { value: "auto", label: "Auto (let Hyprland decide)" },
+          { value: "left", label: "Left of primary display" },
+          { value: "right", label: "Right of primary display" },
+          { value: "above", label: "Above primary display" },
+          { value: "below", label: "Below primary display" }
+        ]
+        onPicked: function(next) { app.set("monitor:" + name + ":position", next) }
+        changed: app.isChanged("monitor:" + name + ":position")
+        onResetRequested: app.resetSetting("monitor:" + name + ":position")
+      }
+
+      // Mirror: show the same content as another display.
+      Ui.PickerRow {
+        label: "Mirror"
+        description: connected ? "Show the same content as another display." : "Applied when the display comes back."
+        value: String(modelData.mirror || "")
+        options: {
+          // Build list of other displays to mirror from
+          var options = [{ value: "", label: "None (extend mode)" }]
+          var displays = app.monitors || []
+          for (var i = 0; i < displays.length; i++) {
+            var d = displays[i]
+            if (d.name !== name && d.connected !== false) {
+              options.push({ value: d.name, label: "Mirror " + (d.label || d.name) })
+            }
+          }
+          return options
+        }
+        onPicked: function(next) { app.set("monitor:" + name + ":mirror", next) }
+        changed: app.isChanged("monitor:" + name + ":mirror")
+        onResetRequested: app.resetSetting("monitor:" + name + ":mirror")
+      }
+
+      // Transform: rotate the display.
+      Ui.PickerRow {
+        label: "Rotation"
+        description: connected ? "" : "Applied when the display comes back."
+        value: String(modelData.transform || "0")
+        options: [
+          { value: "0", label: "Normal (0°)" },
+          { value: "1", label: "90° clockwise" },
+          { value: "2", label: "180°" },
+          { value: "3", label: "270° clockwise" }
+        ]
+        onPicked: function(next) { app.set("monitor:" + name + ":transform", next) }
+        changed: app.isChanged("monitor:" + name + ":transform")
+        onResetRequested: app.resetSetting("monitor:" + name + ":transform")
+      }
+
       // Only once there is something to forget: for a display sitting in front
       // of you with nothing set, there is nothing this would undo.
       Ui.ActionRow {
