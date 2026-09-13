@@ -276,14 +276,16 @@ render_managed_lua() {
     # because a display is unplugged and plugged back in: Hyprland matches its
     # monitor rules again on connect, so this is what makes a resolution or a
     # scale outlast the cable.
-    jq -r '(.monitors // {}) | to_entries[]
-      | select(.value != {})
-      | "hl.monitor({\n  output = " + (.key | @json) + ","
-        + ([.value | to_entries[]
-            | "\n  " + .key + " = "
-              + (if (.value | type) == "string" then "\"" + .value + "\"" else (.value | tostring) end) + ","]
-           | join(""))
-        + "\n})\n"' <<<"$store"
+    #
+    # Symbolic positions (auto, left, right, above, below) are resolved to pixel
+    # coordinates via monitor_lua_table, which calls monitor_resolve_position.
+    local monitor_key monitor_settings_json
+    while IFS= read -r monitor_key; do
+      monitor_settings_json=$(jq -c --arg n "$monitor_key" '(.monitors // {}) | .[$n] // {}' <<<"$store")
+      [[ $monitor_settings_json == "{}" || -z $monitor_settings_json ]] && continue
+      monitor_lua_table "$monitor_key" "$monitor_settings_json"
+      echo ""
+    done < <(jq -r '(.monitors // {}) | to_entries[] | select(.value != {}) | .key' <<<"$store")
   } | write_file "$MANAGED_LUA" managed
 }
 
