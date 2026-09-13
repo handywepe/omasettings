@@ -115,6 +115,8 @@ monitor_live() {
           description: $desc,
           disabled: ($m.disabled // false),
           scale: $m.scale,
+          x: ($m.x // 0),
+          y: ($m.y // 0),
           width: $m.width,
           height: $m.height,
           refreshRate: ($m.refreshRate | floor),
