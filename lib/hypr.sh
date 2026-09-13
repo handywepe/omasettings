@@ -283,7 +283,9 @@ render_managed_lua() {
     while IFS= read -r monitor_key; do
       monitor_settings_json=$(jq -c --arg n "$monitor_key" '(.monitors // {}) | .[$n] // {}' <<<"$store")
       [[ $monitor_settings_json == "{}" || -z $monitor_settings_json ]] && continue
+      echo -n "hl.monitor("
       monitor_lua_table "$monitor_key" "$monitor_settings_json"
+      echo ")"
       echo ""
     done < <(jq -r '(.monitors // {}) | to_entries[] | select(.value != {}) | .key' <<<"$store")
   } | write_file "$MANAGED_LUA" managed
